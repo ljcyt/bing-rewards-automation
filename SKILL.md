@@ -15,7 +15,7 @@ description: 云手机/安卓真机上的 Bing (Microsoft Rewards) 每日积分�
 2. 云手机/真机已连接：`adb devices` 显示目标串号且状态为 device。
 3. Bing App 已安装并登录 Microsoft 账号（脚本不负责登录）。基线版本 32.6.2110003561；升级后 resource-id 可能变化，脚本启动时会把版本号写进日志。
 4. 可选依赖：`pip install transformers torch` 启用本地 logits 决策后端（缺省自动禁用）；API 后端用标准库 urllib，无需安装。
-5. config.json 存在（从 config.example.json 复制）。仓库附带的 config.json 当前 `jev.backend=off`——附带 TypeSafe key 实测全部 401（见下），key 更换有效后改回 `api`。
+5. config.json 存在（从 config.example.json 复制；该文件含 key，已在 .gitignore 中排除，不要提交到仓库）。按需设置 `jev.backend`：`api` 需在 `jev.api_keys` 填入有效的 TypeSafe key，`off` 完全离线走规则引擎。
 
 ## 操作步骤
 
@@ -71,7 +71,7 @@ config.json 关键段：`device.serial`（设备串号）、`tasks.max_searches`
 | 任务停在资料页/积分页找不到搜索框 | ensure_home 自动恢复（BACK→冷启动）；若日志反复出现"冷启动恢复"说明首页结构变化，核对 ID_SEARCH_BOX 常量 |
 | 兜底次数（summary.csv 末列）突然飙升 | App 改版的最灵敏指标，人工核对该日日志 |
 | 个人资料页"发生错误。请联系客户支持" | 脚本自动 BACK 重进（最多 3 次），真机实测可恢复 |
-| 日志大量 DECISION_BACKEND_FALLBACK | TypeSafe AI key 失效（2026-10-07 实测附带 4 个 key 全部返回 401）或网络不通；到 console.typesafe.ai 更换 `jev.api_keys` 数组，或临时把 `jev.backend` 设为 `off`（免轮换等待） |
+| 日志大量 DECISION_BACKEND_FALLBACK | TypeSafe AI key 失效或网络不通；到 console.typesafe.ai 核对并更换 `jev.api_keys`（完整格式 `apikey_<hex_hex>`），或临时把 `jev.backend` 设为 `off`（免轮换等待） |
 
 ## 风险与限制
 - 自动化 Rewards 有封号风险（各开源项目 README 均明示）；脚本以随机延迟、随机词序、限次、固定设备指纹降低风险，但不能消除。
