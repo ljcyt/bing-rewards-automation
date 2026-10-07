@@ -11,6 +11,7 @@
 | `words.txt` | 200+ ASCII 搜索词库，每日随机取词 |
 | `run_daily.bat` | Windows 计划任务入口 |
 | `SKILL.md` | Agent skill 规范说明 |
+| `tools/` | 辅助脚本：连通自检、单测、进度读取、诊断（见 `tools/README.md`） |
 | `logs/`、`results/` | 运行日志与结果汇总（自动生成） |
 
 ## 快速开始
@@ -39,7 +40,7 @@ python bing_rewards.py
 
 - 用途：`jev.backend=api` 时，脚本把当前屏幕摘要（页面类型、锚点、可点文本）POST 到 TypeSafe AI 官方 System One 接口，由 Jev 模型（`jev-latest`）做单步判别，返回离散动作 choice + 置信度。
 - Endpoint / 模型名：TypeSafe AI 官方文档（truefoundry.com/docs/ai-gateway/jev）——`POST https://api.typesafe.ai/v1/systemone`，`Authorization: Bearer <key>`，body 为 TypeSafe 自有 schema `{"model", "state", "questions"}`，响应 `{"model", "answers", "usage"}`，模型别名 `jev-latest`。
-- **⚠️ 只认官方域名**：TypeSafe 官方域名只有 `api.typesafe.ai` 与 `console.typesafe.ai`，其他任何域名（包括第三方中转/代理站）都不是官方端点，配置为 `jev.endpoint` 会导致 key 被拒（401）。连通性自检：`python test_jev_api.py`。
+- **⚠️ 只认官方域名**：TypeSafe 官方域名只有 `api.typesafe.ai` 与 `console.typesafe.ai`，其他任何域名（包括第三方中转/代理站）都不是官方端点，配置为 `jev.endpoint` 会导致 key 被拒（401）。连通性自检：`python tools/test_jev_api.py`。
 - **主备轮换机制**：`jev.api_keys` 数组存全部 key（主 key 在前，备用 key 依次排后）。请求遇到 HTTP 401/402/403/429 或响应含 quota/credit/insufficient 等额度类错误时，自动换下一个 key 重试；同一轮决策最多轮完全部 key，全部失效则本步降级规则引擎并记 `DECISION_BACKEND_FALLBACK`。key 只存配置文件，绝不硬编码进 py 脚本。
 - 替换：到 console.typesafe.ai 生成新 key，改 `config.json` 与 `config.example.json` 的 `jev.api_keys` 数组即可（不需要改脚本）。key 需为官方完整格式 `apikey_<hex_hex>`；脚本（`TypeSafeApiBackend.__init__`）会对裸 `hex_hex` 自动补 `apikey_` 前缀，裸 key 直发会 401。
 - 降级：API 超时（8s）/解析失败 → 本地 logits 后端（需 `pip install transformers torch`，未装自动禁用）→ 确定性规则引擎（永远可用）。`jev.backend` 设 `off` 直接走规则引擎，完全不联网。

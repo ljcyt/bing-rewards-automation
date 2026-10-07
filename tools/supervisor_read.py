@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 
-BASE = r"C:\Users\WSFG\.zcode\workspace\default\bing-rewards-automation"
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERIAL = "127.0.0.1:55556"
 
 
@@ -36,7 +36,7 @@ def measure():
         if not ensure_connected():
             continue
         try:
-            r = subprocess.run([sys.executable, "read_progress.py"], cwd=BASE,
+            r = subprocess.run([sys.executable, os.path.join(BASE, "tools", "read_progress.py")], cwd=BASE,
                                capture_output=True, text=True, timeout=420)
             m = re.search(r"READ_PROGRESS=(\d+)/(\d+)", r.stdout)
             if m:

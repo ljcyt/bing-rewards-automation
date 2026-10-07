@@ -24,7 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")
 OFFICIAL_HOST = "api.typesafe.ai"
 KEY_PREFIX = "apikey_"
 

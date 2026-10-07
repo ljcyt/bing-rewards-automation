@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""修复项自查单测（不依赖真机/torch）：python test_fixes.py"""
+"""修复项自查单测（不依赖真机/torch）：python tools/test_fixes.py"""
 import math
+import os
 import sys
 
-sys.path.insert(0, '.')
-import bing_rewards as br
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
+import bing_rewards as br  # noqa: E402
 
-log = br.Logger('logs', dry=True)
+log = br.Logger(os.path.join(BASE_DIR, "logs"), dry=True)
 passed = []
 
 # ---------- 1) 规则引擎 rewards 页对三类任务候选都能给动作（修 daily_activities 死锁） ----------
