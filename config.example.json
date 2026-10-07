@@ -1,0 +1,41 @@
+{
+  "_comment": "复制本文件为 config.json 后使用。jev.api_keys 为 TypeSafe AI 官方服务密钥列表（主 key 在前，备用 key 依次排后；401/403/额度类错误时按序轮换，全部失效自动降级规则引擎）。key 用官方完整格式 apikey_<hex_hex>（脚本会自动补前缀）。可在 console.typesafe.ai 生成/轮换。注意：TypeSafe 官方域名只有 api.typesafe.ai 与 console.typesafe.ai，其余任何域名（如 jevmodel.org）均为第三方，endpoint 必须保持 https://api.typesafe.ai/v1/systemone。",
+  "device": {
+    "serial": "127.0.0.1:55556",
+    "adb_path": "adb"
+  },
+  "tasks": {
+    "max_searches": 30,
+    "watchdog_minutes": 45
+  },
+  "delays": {
+    "click": [1.5, 4.0],
+    "page_load": [2.0, 6.0],
+    "between_tasks": [20, 90],
+    "dwell_search": [6, 14],
+    "dwell_activity": [15, 40],
+    "dwell_read": [20, 50],
+    "dwell_quiz": [30, 60]
+  },
+  "human": {
+    "start_jitter_minutes": 25,
+    "zoneout_prob": 0.07,
+    "tap_jitter_px": 30
+  },
+  "jev": {
+    "backend": "api",
+    "endpoint": "https://api.typesafe.ai/v1/systemone",
+    "model": "jev-latest",
+    "timeout_s": 8,
+    "api_keys": [
+      "替换为主key",
+      "替换为备用key1",
+      "替换为备用key2",
+      "替换为备用key3"
+    ]
+  },
+  "local_model": {
+    "enabled_auto": true,
+    "name": "Qwen/Qwen2.5-0.5B"
+  }
+}

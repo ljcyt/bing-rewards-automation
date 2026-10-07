@@ -1,0 +1,17 @@
+# 密钥与个人配置，绝不入库
+config.json
+config.test.json
+
+# 运行产物
+logs/
+results/
+*.log
+__pycache__/
+nul
+
+# 真机截图与 UI dump
+*.png
+*.jpg
+*.xml
+diag_ui.xml
+ui_*.xml
