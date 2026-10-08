@@ -189,6 +189,12 @@ class Node:
         return x2 > 0 and y2 > 0
 
     @property
+    def visible(self):
+        """bounds 有效且四边有序（非倒挂）、非零面积——滚动到屏幕边缘时会出现 y1>y2 的残缺 bounds。"""
+        x1, y1, x2, y2 = self.bounds
+        return x2 > x1 and y2 > y1
+
+    @property
     def center(self):
         x1, y1, x2, y2 = self.bounds
         return ((x1 + x2) // 2, (y1 + y2) // 2)
@@ -965,6 +971,8 @@ READ_BATCH = 3          # 每批篇数（单篇 3 分，读 3 篇回积分页核
 READ_FEED_MIN_TITLE = 12  # 新闻流文章标题 content-desc 最短长度（过滤导航/按钮类节点）
 READ_AD_TEXTS = ("广告", "广告选项")
 READ_PROMO_TEXTS = ("豆包", "Booking")  # 推广卡实测样本
+# 积分页任务卡文案：出现在新闻流候选里说明误把积分页当文章流（点击落空时的兜底保险）
+READ_TASK_CARD_TEXTS = ("阅读以赚取", "每日活动", "已赚取", "搜索以赚取", "兑换积分")
 
 
 def tapable_ancestor(node, max_up=12):
@@ -984,8 +992,14 @@ def _boxes_overlap(a, b):
     return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
 
 
-def _find_read_card(adb, human, log, max_rounds=8):
-    """积分页滚动定位"阅读以赚取"卡。返回 (已赚, 需要, 卡节点)；找不到返回 (None, None, None)。"""
+def _find_read_card(adb, human, log, max_rounds=8, need_visible=False):
+    """积分页滚动定位"阅读以赚取"卡。返回 (已赚, 需要, 卡节点)；找不到返回 (None, None, None)。
+
+    need_visible=True 时要求卡片当前有完整可见的 bounds（已滚入可视区且非边缘残缺），
+    否则继续滚动——卡片在屏幕外时 bounds=[0,0][0,0]，滚动到边缘时会出现 y1>y2 的
+    残缺 bounds，两种情况点击都会落到别处而无法进入新闻流。
+    """
+    last = (None, None, None)
     for _ in range(max_rounds):
         screen = Screen(adb.dump(), adb.current_activity())
         if handle_popup(screen, human, adb, log):
@@ -995,16 +1009,20 @@ def _find_read_card(adb, human, log, max_rounds=8):
             if m:
                 earned = int(m.group(1).replace(",", ""))
                 need = int(m.group(2).replace(",", ""))
-                return earned, need, n
+                if not need_visible:
+                    return earned, need, n
+                if n.visible:
+                    return earned, need, n
+                last = (earned, need, n)  # 记录进度，继续滚动等它完整进入可视区
         human.swipe_up(adb)
         human.sleep(1.0, 2.0, tag="read_scroll")
-    return None, None, None
+    return last if need_visible else (None, None, None)
 
 
 def _feed_article_candidates(screen, seen):
     """新闻流文章卡：clickable + content-desc 为标题(>12字) + 无 resource-id + bounds 真实。
     跳过广告卡（desc/文本含"广告"，或与 nativead-river-*-img 节点 bounds 重叠）、
-    推广卡（豆包/Booking 等）、禁区词与已读标题。"""
+    推广卡（豆包/Booking 等）、积分页任务卡（阅读以赚取/每日活动等）、禁区词与已读标题。"""
     ad_boxes = [n.bounds for n in screen.nodes if "nativead" in (n.rid or "")]
     cands = []
     for n in screen.nodes:
@@ -1015,6 +1033,8 @@ def _feed_article_candidates(screen, seen):
             continue
         hay = title + " " + (n.text or "")
         if any(m in hay for m in READ_AD_TEXTS) or any(m in hay for m in READ_PROMO_TEXTS):
+            continue
+        if any(m in hay for m in READ_TASK_CARD_TEXTS):  # 保险：积分页任务卡不是文章
             continue
         if any(_boxes_overlap(n.bounds, b) for b in ad_boxes):
             continue
@@ -1113,7 +1133,7 @@ def task_read(ctx):
         if ctx["over_deadline"]():
             log("  [read] 达到任务时限 → 提前结束")
             break
-        earned, need, card = _find_read_card(adb, human, log)
+        earned, need, card = _find_read_card(adb, human, log, need_visible=True)
         if card is None:
             log("  [read] 积分页找不到\"阅读以赚取\"卡片")
             break
@@ -1125,17 +1145,25 @@ def task_read(ctx):
         if forbidden_hit(card):
             log("  [read] 卡片命中禁区词，跳过")
             return "skipped"
-        anc = tapable_ancestor(card)  # WebView 卡片自身 [0,0][0,0] → 点可视祖先中心
-        if not anc or not safe_tap(human, adb, anc, log):
-            log("  [read] 卡片可视祖先不可点")
+        # 卡片已完整滚入可视区（need_visible），自身即 clickable，直接点自身中心；
+        # 兜底才用可视祖先（WebView 卡片自身可能仍为 [0,0][0,0]）
+        target = card if card.visible else tapable_ancestor(card)
+        if not target or not safe_tap(human, adb, target, log):
+            log("  [read] 阅读卡不可点")
             break
         human.sleep(8.0, 12.0, tag="read_landing")  # 实测约 9 秒加载进新闻流
         scr = Screen(adb.dump(), adb.current_activity())
-        if "TemplateActivity" in scr.activity:  # 仍在积分页 → 重试一次点击
-            anc = tapable_ancestor(card)
-            if anc and not safe_tap(human, adb, anc, log):
+        # 必须确认已离开积分页；否则说明点击落空，重试一次后放弃本批
+        if "TemplateActivity" in scr.activity or scr.by_id("com.microsoft.bing:id/dailyActivities"):
+            log("  [read] 点击后仍在积分页 → 重试一次")
+            target = card if card.visible else tapable_ancestor(card)
+            if not target or not safe_tap(human, adb, target, log):
                 break
             human.sleep(8.0, 12.0, tag="read_landing_retry")
+            scr = Screen(adb.dump(), adb.current_activity())
+            if "TemplateActivity" in scr.activity or scr.by_id("com.microsoft.bing:id/dailyActivities"):
+                log("  [read] 仍未能进入新闻流 → 结束本批（避免把积分页卡片误当文章）")
+                break
         got = _read_articles_in_feed(adb, human, log, jev, ctx, seen, max_articles=READ_BATCH)
         total_read += got
         log("  [read] 本批 %d 篇，累计 %d 篇" % (got, total_read))
