@@ -53,6 +53,28 @@ bash /sdcard/br/run_daily.sh
 
 日志写到 `~/bing-rewards/logs/run_YYYY-MM-DD.log`，保留 14 天。
 
+跑完会自动审核：读今日积分，**未满 120 就在积分页抓取未完成任务清单并截图留证**，结果写入 `results/YYYY-MM-DD.json` 的 `audit` 字段，同时打印到日志。
+
+### 5. 配每日定时（可选，推荐）
+
+```bash
+bash /sdcard/br/setup_cron.sh
+```
+
+安装 cronie 并写入 crontab：**每天 09:00** 自动执行 `run_daily.sh`。日志在 `~/bing-rewards/logs/cron.log`。
+
+改时间：编辑 crontab（`crontab -e`），第一列是分钟、第二列是小时。例如每天 20:30 就写 `30 20 * * * ...`。
+
+确认 crond 在跑：`pgrep -f crond`。若开机后没自启，手动 `nohup crond > /dev/null 2>&1 &`。
+
+### 6. 随时审核（不跑任务）
+
+```bash
+cd ~/bing-rewards && python3 bing_rewards.py --audit
+```
+
+只读今日积分：已满则直接退出；未满则列出已完成/未完成任务并截图。适合跑完想快速确认时用。
+
 ## 从电脑验收
 
 隧道通的时候：

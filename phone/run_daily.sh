@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# 手机端每日执行入口（在 Termux 里执行：bash run_daily.sh）
-# 全部操作走本机 adb（127.0.0.1:5555），不依赖任何隧道。
+# 手机端每日执行入口：跑全部任务 → 自动审核今日积分（未满则抓取未完成任务）
+# 用法：bash run_daily.sh
 APP="$HOME/bing-rewards"
 LOG="$APP/logs/run_$(date +%Y-%m-%d).log"
 
@@ -13,6 +13,7 @@ echo "[$(date)] === 每日任务开始 ===" >> "$LOG"
 adb start-server >/dev/null 2>&1 || true
 adb connect 127.0.0.1:5555 >/dev/null 2>&1 || true
 
+# 主任务（脚本内部跑完会自动审核今日积分；未满则抓取未完成任务并截图留证）
 python3 bing_rewards.py >> "$LOG" 2>&1
 RC=$?
 echo "[$(date)] === 退出码 $RC ===" >> "$LOG"

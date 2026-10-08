@@ -9,5 +9,7 @@
 | `read_progress.py` | 读取"阅读以赚取"卡片进度，输出 `READ_PROGRESS=X/Y` | 是 |
 | `supervisor_read.py` | read 任务监督循环：反复跑 `--single read` 并测进度，满 30/30 或连续 2 轮不涨即停 | 是 |
 | `diag_feed.py` | 诊断：进新闻流后 dump，统计文章候选命中数并打印卡片节点 | 是 |
+| `diag_read.py` | 诊断：复现阅读任务的导航与收割逻辑，定位点击落空/误收割 | 是 |
+| `probe_read_rule.py` | 实验：逐篇阅读并逐篇核对进度，确定阅读计分规则 | 是 |
 
 运行前提与主脚本相同：`adb` 可用、设备已连接（`config.json` 的 `device.serial`）、Bing 已登录。

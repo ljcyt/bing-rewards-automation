@@ -1230,6 +1230,82 @@ def task_quiz(ctx):
 
 
 # ---------------------------------------------------------------- 主流程
+def audit_tasks(adb, human, log, target_daily=120):
+    """跑完后审核：读今日积分，若未满 target_daily 则抓取积分页未完成任务清单。
+
+    返回 dict：
+      {"daily": "110/120", "daily_now": 110, "daily_target": 120, "full": False,
+       "pending": [{"name":..., "earned":..., "need":...}],
+       "done": [{"name":..., "points":...}], "screenshot": "/sdcard/...png"}
+    进度判定依据 = 积分页各任务卡文本（已完成"已赚取的 N 积分"；未完成"已赚取 X 积分(需要 Y 积分)"）。
+    """
+    result = {"daily": None, "daily_now": None, "daily_target": target_daily,
+              "full": False, "pending": [], "done": [], "screenshot": None}
+
+    # 1) 读今日积分
+    pts = read_points(adb, human, log)
+    if pts:
+        result["daily"] = pts.get("daily")
+        m = re.match(r"\s*(\d+)\s*/\s*(\d+)", pts.get("daily") or "")
+        if m:
+            result["daily_now"] = int(m.group(1))
+            result["daily_target"] = int(m.group(2))
+    if result["daily_now"] is not None and result["daily_now"] >= result["daily_target"]:
+        result["full"] = True
+        log("  [audit] 今日积分 %s 已满 → 无需抓取未完成任务" % result["daily"])
+        return result
+
+    log("  [audit] 今日积分 %s 未满 → 抓取未完成任务清单" % result["daily"])
+
+    # 2) 进积分页，滚遍页面收集所有任务卡
+    if not goto_rewards_entry(adb, human, log):
+        log("  [audit] 未能进入积分页，跳过任务抓取")
+        return result
+
+    seen = {}
+    for _ in range(10):
+        screen = Screen(adb.dump(), adb.current_activity())
+        if handle_popup(screen, human, adb, log):
+            continue
+        for n in screen.nodes:
+            label = ((n.text or "") + " " + (n.desc or "")).strip()
+            if not label or label in seen:
+                continue
+            if not any(k in label for k in AUDIT_TASK_NAMES):
+                continue
+            seen[label] = n
+        human.swipe_up(adb)
+        human.sleep(0.8, 1.5, tag="audit_scan")
+
+    # 3) 归类完成 / 未完成
+    for label in seen:
+        m_done = AUDIT_DONE_RE.search(label)
+        m_pend = AUDIT_PENDING_RE.search(label)
+        if m_pend:  # 未完成：有"(需要 N 积分)"且 X < N
+            earned = int(m_pend.group(1).replace(",", ""))
+            need = int(m_pend.group(2).replace(",", ""))
+            if earned < need:
+                name = label.split(",")[0].strip()
+                result["pending"].append({"name": name, "earned": earned, "need": need})
+        elif m_done:  # 已完成：显示"已赚取的 N 积分"
+            name = label.split(",")[0].strip()
+            result["done"].append({"name": name, "points": int(m_done.group(1).replace(",", ""))})
+
+    # 4) 截图留证（未满时抓取积分页现场）
+    try:
+        adb.shell("screencap -p /sdcard/audit_%s.png" % datetime.now().strftime("%Y%m%d_%H%M%S"))
+        result["screenshot"] = "/sdcard/audit_%s.png" % datetime.now().strftime("%Y%m%d_%H%M%S")
+        adb.shell("uiautomator dump /sdcard/audit_%s.xml" % datetime.now().strftime("%Y%m%d_%H%M%S"))
+    except Exception as e:
+        log("  [audit] 截图/dump 失败: %s" % e)
+
+    log("  [audit] 已完成 %d 项: %s" % (len(result["done"]),
+        ", ".join("%s(%d分)" % (d["name"], d["points"]) for d in result["done"])))
+    log("  [audit] 未完成 %d 项: %s" % (len(result["pending"]),
+        ", ".join("%s(%d/%d)" % (p["name"], p["earned"], p["need"]) for p in result["pending"]) or "无"))
+    return result
+
+
 TASKS = [
     ("checkin", "签到（签入）", task_checkin),
     ("search", "搜索赚分", task_search),
@@ -1237,6 +1313,13 @@ TASKS = [
     ("read", "阅读赚分", task_read),
     ("quiz", "每日 Quiz / 资讯活动卡", task_quiz),
 ]
+
+# 积分页任务卡完成态判定：
+#   已完成 = "搜索以赚取, 已赚取的 60 积分"      （"已赚取的 N 积分"）
+#   未完成 = "阅读以赚取, , 已赚取 0 积分(需要 30 积分)"（"已赚取 X 积分(需要 Y 积分)"）
+AUDIT_DONE_RE = re.compile(r"已赚取的\s*([\d,]+)\s*积分")
+AUDIT_PENDING_RE = re.compile(r"已赚取\s*([\d,]+)\s*积分\s*[（(]\s*需要\s*([\d,]+)\s*积分\s*[）)]")
+AUDIT_TASK_NAMES = ("签入", "签到", "搜索", "每日活动", "阅读", "赚取", "Day")
 
 
 def load_config(path):
@@ -1251,6 +1334,8 @@ def main():
                     help="dump+决策+打印将执行的任务；不执行任务动作（搜索/开卡），仅允许导航类点击")
     ap.add_argument("--max-searches", type=int, default=None, help="搜索次数上限（默认读配置/30）")
     ap.add_argument("--single", choices=[t[0] for t in TASKS], help="只跑单个任务")
+    ap.add_argument("--audit", action="store_true",
+                    help="只审核：读今日积分，未满则抓取未完成任务清单（不跑任务）")
     args = ap.parse_args()
 
     if not os.path.exists(args.config):
@@ -1291,7 +1376,7 @@ def main():
 
     # 每日开始时间随机偏移 ±25 分钟（正式跑且非单任务时）
     jitter = cfg.get("human", {}).get("start_jitter_minutes", 25)
-    if not args.dry_run and not args.single and jitter:
+    if not args.dry_run and not args.single and not args.audit and jitter:
         delay = random.uniform(-jitter * 60, jitter * 60)
         if delay > 0:
             log("开始随机偏移 +%.0fs" % delay)
@@ -1304,8 +1389,22 @@ def main():
 
     ctx = {"adb": adb, "human": human, "log": log, "jev": jev, "over_deadline": over_deadline}
 
-    before = read_points(adb, human, log) if not args.dry_run else None
-    log("任务前积分: %s" % before)
+    # 审核模式：不读"任务前积分"（审核自身会读），也不跑任务
+    before = read_points(adb, human, log) if not args.dry_run and not args.audit else None
+    if not args.audit:
+        log("任务前积分: %s" % before)
+
+    if args.audit:
+        log("--- 审核模式：只核对今日积分与未完成任务 ---")
+        audit = audit_tasks(adb, human, log)
+        adb.stop_bing()
+        if audit.get("full"):
+            print("[audit] 今日积分 %s 已满" % audit.get("daily"))
+        else:
+            print("[audit] 今日积分 %s 未满，未完成 %d 项：" % (audit.get("daily"), len(audit.get("pending") or [])))
+            for p in (audit.get("pending") or []):
+                print("  - %s (%d/%d)" % (p["name"], p["earned"], p["need"]))
+        return 0 if audit.get("full") else 1
 
     if args.dry_run:
         return dry_run(ctx, max_searches)
@@ -1342,6 +1441,15 @@ def main():
     after = read_points(adb, human, log)
     log("任务后积分: %s" % after)
 
+    # 审核：今日积分未满则抓取未完成任务清单（跑完即审，不需要人工核对）
+    audit = None
+    if not args.single:
+        log("--- 审核：核对今日积分 ---")
+        try:
+            audit = audit_tasks(adb, human, log)
+        except Exception as e:
+            log("  [audit] 审核异常: %s" % e)
+
     # 收尾
     adb.stop_bing()
     log("已 force-stop Bing")
@@ -1357,6 +1465,7 @@ def main():
         "daily_points_after": (after or {}).get("daily"),
         "streak": (after or {}).get("streak"),
         "all_status": all_status,
+        "audit": audit,
         "finished_at": datetime.now().isoformat(timespec="seconds"),
     }
     os.makedirs(results_dir, exist_ok=True)
@@ -1379,6 +1488,16 @@ def main():
         % (all_status, ok, len(results), delta))
     for r in results:
         log("  %s: %s (retries=%d)" % (r["name"], r["status"], r["retries"]))
+    if audit:
+        if audit.get("full"):
+            log("=== 审核: 今日积分 %s 已满 ===" % audit.get("daily"))
+        else:
+            log("=== 审核: 今日积分 %s 未满，未完成任务 %d 项 ==="
+                % (audit.get("daily"), len(audit.get("pending") or [])))
+            for p in (audit.get("pending") or []):
+                log("  未完成: %s (%d/%d)" % (p["name"], p["earned"], p["need"]))
+            if audit.get("screenshot"):
+                log("  现场留证: %s" % audit["screenshot"])
     return 0 if all_status == "done" else (1 if ok else 2)
 
 

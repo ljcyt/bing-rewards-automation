@@ -37,6 +37,8 @@ python bing_rewards.py
 1. `--dry-run`：连接设备、启动 Bing、dump 界面、输出页面分类与首步决策，并模拟正式跑前置链路（读积分→验搜索框可见性）；不执行任务动作（搜索/开卡），但含导航类点击（进头像/积分卡）。
 2. `--single <checkin|search|daily_activities|read|quiz>`：单任务调试（建议人工验证 2-3 天）。
 3. 正式跑：顺序执行全部任务，结束时打印各任务完成情况汇总，写 `results/YYYY-MM-DD.json` 与 `results/summary.csv`。退出码 `0`=全部成功，`1`=部分失败，`2`=设备/App 失败。
+4. 跑完自动审核：读今日积分，**未满 120 就在积分页抓取未完成任务清单并截图留证**，写入结果 JSON 的 `audit` 字段并打印到日志。
+5. `--audit`：只审核不跑任务（读今日积分，未满则列出未完成任务）。
 
 ## 配置说明（config.json）
 
