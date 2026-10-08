@@ -9,10 +9,20 @@
 | `bing_rewards.py` | 主脚本（Python 3.8+ 标准库，transformers/torch 为可选） |
 | `config.example.json` | 配置模板（复制为 `config.json` 后按需修改，key 填入 `jev.api_keys`） |
 | `words.txt` | 200+ ASCII 搜索词库，每日随机取词 |
-| `run_daily.bat` | Windows 计划任务入口 |
+| `run_daily.bat` | Windows 计划任务入口（电脑侧执行，经 adb 隧道） |
+| `phone/` | 手机端执行方案：脚本跑在云手机 Termux 里，adb 仅做部署与验收（见 `phone/README.md`） |
 | `SKILL.md` | Agent skill 规范说明 |
 | `tools/` | 辅助脚本：连通自检、单测、进度读取、诊断（见 `tools/README.md`） |
 | `logs/`、`results/` | 运行日志与结果汇总（自动生成） |
+
+## 两种执行方式
+
+| 方式 | 执行位置 | 适用场景 | 入口 |
+|---|---|---|---|
+| 电脑侧 | Windows，经 adb 隧道控制设备 | 隧道稳定、希望电脑统一管理日志 | `run_daily.bat` |
+| 手机侧 | 云手机 Termux 内，adb 连本机 5555 | 隧道抖动频繁、或电脑关机时也要跑 | `phone/run_daily.sh` |
+
+两套方式共用同一份 `bing_rewards.py`，仅 `config.json` 的 `device.serial` 不同（电脑侧 `127.0.0.1:55556`，手机侧 `127.0.0.1:5555`）。
 
 ## 快速开始
 

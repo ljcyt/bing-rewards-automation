@@ -1,6 +1,7 @@
 # 密钥与个人配置，绝不入库
 config.json
 config.test.json
+phone/config.phone.json
 
 # 运行产物
 logs/
