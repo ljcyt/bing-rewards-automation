@@ -358,5 +358,39 @@ assert day_taps and "Day 2" in day_taps[0], "未优先点 Day 卡: %r" % fa6.tap
 assert not any("已赚取" in t for t in fa6.tapped), "点开了已完成卡: %r" % fa6.tapped
 passed.append("8 daily_activities 优先 Day 卡且排除已赚取")
 
+# ---------- 9) Jev 审核：取全部显著未完成项，不只 top1 ----------
+class _FakeApi:
+    ok = True
+    def ask(self, state, q):
+        # 模拟实测：read 0.51 / search 0.47 两项均显著，choice 只报 read
+        return {"pending": {"type": "choice", "choice": "read", "confidence": 0.41,
+                            "probabilities": {"read": 0.51, "search": 0.47, "checkin": 0.02,
+                                              "quiz": 0.0, "daily_activities": 0.0, "none": 0.0}}}
+
+
+class _FakeJev:
+    mode = "api"
+    api = _FakeApi()
+    log = log
+    audit = br.Jev.audit
+
+
+_jr = br.Jev.audit(_FakeJev(), ["阅读以赚取, , 已赚取 0 积分(需要 30 积分)",
+                                "搜索以赚取, 已赚取 30 积分(需要 60 积分)"], "80/120")
+assert set(_jr["pending"]) == {"read", "search"}, "未取全部显著项: %r" % _jr
+assert _jr["choice"] == "read", _jr
+passed.append("9 Jev 审核取全部显著未完成项(probabilities>=0.15，不只 top1)")
+
+# ---------- 10) Jev 审核：后端不可用时返回 None，不抛异常 ----------
+class _OffJev:
+    mode = "off"
+    api = None
+    log = log
+    audit = br.Jev.audit
+
+
+assert br.Jev.audit(_OffJev(), ["x"], "80/120") is None
+passed.append("10 Jev 审核在后端关闭时返回 None（不抛异常，规则结果不受影响）")
+
 print("\n".join("PASS " + p for p in passed))
 print("ALL_UNIT_TESTS_OK")

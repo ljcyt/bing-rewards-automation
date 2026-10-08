@@ -434,6 +434,34 @@ class TypeSafeApiBackend:
         self.log("  [jev/api] key#%d %.0fms" % (self.key_index, (time.time() - t0) * 1000))
         return data
 
+    def ask(self, state, questions):
+        """通用多问题调用：返回 answers 原始字典（含 choice/confidence/probabilities）。
+
+        与 decide() 的区别：不限定单个动作，可用于审核等开放判断。key 轮换逻辑一致。
+        """
+        body = json.dumps({"state": state, "model": self.model,
+                           "questions": questions}).encode()
+        data = None
+        last = None
+        for _ in range(len(self.api_keys)):
+            try:
+                data = self._request_once(body)
+                break
+            except urllib.error.HTTPError as e:
+                last = e
+                if self._is_key_fatal(e):
+                    self.log("  [jev/api] key#%d 失效(HTTP %s) → 轮换下一个 key"
+                             % (self.key_index, e.code))
+                    self.key_index = (self.key_index + 1) % len(self.api_keys)
+                    continue
+                raise
+            except Exception as e:
+                last = e
+                raise
+        if data is None:
+            raise AdbError("TypeSafe API 全部 %d 个 key 失效: %s" % (len(self.api_keys), last))
+        return data.get("answers", {})
+
     def decide(self, state, candidates, ctx):
         questions = {"action": {
             "type": "choice",
@@ -609,6 +637,51 @@ class Jev:
         self.confs.append(round(decision.get("confidence", 0), 3))
         self.log("  [jev] decision=%s" % json.dumps(decision, ensure_ascii=False))
         return decision
+
+    def audit(self, tasks, daily_points):
+        """用 Jev 语义核对任务完成情况。
+
+        tasks: 页面上抓到的任务文案列表（如 "阅读以赚取, , 已赚取 0 积分(需要 30 积分)"）
+        daily_points: 今日积分文本（如 "80/120"）
+        返回 dict 或 None（后端不可用/失败时）：
+          {"pending": [任务键...], "probabilities": {...}, "confidence": float}
+        关键：取 probabilities 中所有超过阈值的项（不只 top1）——实测未完成多项时
+        top1/top2 概率接近（0.51 vs 0.47），只看 choice 会漏项。
+        """
+        if self.mode != "api" or not self.api or not self.api.ok:
+            return None
+        state = json.dumps({"page": "rewards", "daily_points": daily_points,
+                            "tasks_on_page": tasks}, ensure_ascii=False)
+        questions = {"pending": {
+            "type": "choice",
+            "instructions": "下面是 Bing Rewards 积分页上抓到的任务文案。"
+                            "找出尚未完成的任务（可多选，返回概率最高的一个，"
+                            "其余看 probabilities）。已完成文案形如'已赚取的 N 积分'；"
+                            "未完成形如'已赚取 X 积分(需要 Y 积分)'且 X<Y。",
+            "criteria": {
+                "checkin": "签到（签入）未完成",
+                "search": "搜索赚分未完成",
+                "daily_activities": "每日活动未完成",
+                "read": "阅读以赚取未完成",
+                "quiz": "每日 Quiz / 资讯活动卡未完成",
+                "none": "以上全部已完成",
+            },
+        }}
+        try:
+            ans = self.api.ask(state, questions).get("pending") or {}
+        except Exception as e:
+            self.log("  [jev/audit] 调用失败: %s → 审核仅用规则结果" % e)
+            return None
+        probs = ans.get("probabilities") or {}
+        conf = float(ans.get("confidence", 0))
+        # 取所有显著项（阈值 0.15：实测未完成项 0.47~0.51，已完成项 ≤0.07）
+        pending = [k for k, v in probs.items()
+                   if k != "none" and float(v) >= 0.15]
+        pending.sort(key=lambda k: -float(probs.get(k, 0)))
+        self.log("  [jev/audit] choice=%s conf=%.2f 显著未完成=%s"
+                 % (ans.get("choice"), conf, pending))
+        return {"pending": pending, "probabilities": probs,
+                "confidence": conf, "choice": ans.get("choice")}
 
     def gate(self, decision, screen, required_anchors=()):
         """门控执行判定。返回 True=允许执行。"""
@@ -1230,17 +1303,26 @@ def task_quiz(ctx):
 
 
 # ---------------------------------------------------------------- 主流程
-def audit_tasks(adb, human, log, target_daily=120):
+def audit_tasks(adb, human, log, target_daily=120, jev=None):
     """跑完后审核：读今日积分，若未满 target_daily 则抓取积分页未完成任务清单。
+
+    判定分三层，以规则解析为准、Jev 做语义核对：
+      1) 规则解析页面文案（确定结果）：已完成"已赚取的 N 积分"；未完成"已赚取 X 积分(需要 Y 积分)"。
+      2) Jev 语义核对（jev 传入且 backend=api 时）：把抓到的任务文案交给 Jev 判别未完成项，
+         取 probabilities 中所有显著项（不只 top1，实测多项未完成时概率接近会漏项）。
+      3) 分歧处理：两者结果不一致时以规则为准，并把分歧记入 disagreement 字段（不静默吞掉）。
 
     返回 dict：
       {"daily": "110/120", "daily_now": 110, "daily_target": 120, "full": False,
        "pending": [{"name":..., "earned":..., "need":...}],
-       "done": [{"name":..., "points":...}], "screenshot": "/sdcard/...png"}
-    进度判定依据 = 积分页各任务卡文本（已完成"已赚取的 N 积分"；未完成"已赚取 X 积分(需要 Y 积分)"）。
+       "done": [{"name":..., "points":...}],
+       "jev": {"pending": [...], "confidence":..., "probabilities": {...}} | None,
+       "disagreement": [...] | None,
+       "screenshot": "/sdcard/...png", "dump": "/sdcard/...xml"}
     """
     result = {"daily": None, "daily_now": None, "daily_target": target_daily,
-              "full": False, "pending": [], "done": [], "screenshot": None}
+              "full": False, "pending": [], "done": [], "jev": None,
+              "disagreement": None, "screenshot": None, "dump": None}
 
     # 1) 读今日积分
     pts = read_points(adb, human, log)
@@ -1277,7 +1359,7 @@ def audit_tasks(adb, human, log, target_daily=120):
         human.swipe_up(adb)
         human.sleep(0.8, 1.5, tag="audit_scan")
 
-    # 3) 归类完成 / 未完成
+    # 3) 规则解析（确定结果）
     for label in seen:
         m_done = AUDIT_DONE_RE.search(label)
         m_pend = AUDIT_PENDING_RE.search(label)
@@ -1291,11 +1373,31 @@ def audit_tasks(adb, human, log, target_daily=120):
             name = label.split(",")[0].strip()
             result["done"].append({"name": name, "points": int(m_done.group(1).replace(",", ""))})
 
-    # 4) 截图留证（未满时抓取积分页现场）
+    # 4) Jev 语义核对（可选；失败不影响规则结果）
+    if jev is not None:
+        jev_res = jev.audit(list(seen.keys()), result["daily"])
+        if jev_res:
+            result["jev"] = jev_res
+            rule_pending = set(p["name"] for p in result["pending"])
+            # 分歧：Jev 认为未完成但规则判已完成，或反之
+            jev_pending = set(jev_res["pending"])
+            if jev_pending != rule_pending:
+                only_jev = sorted(jev_pending - rule_pending)
+                only_rule = sorted(rule_pending - jev_pending)
+                result["disagreement"] = {
+                    "only_jev": only_jev, "only_rule": only_rule,
+                    "note": "以规则解析为准；差异多为文案变体或语义近似，请人工确认",
+                }
+                log("  [audit] Jev 与规则不一致：仅Jev=%s 仅规则=%s（以规则为准）"
+                    % (only_jev, only_rule))
+
+    # 5) 截图 + dump 留证（未满时抓取积分页现场）
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     try:
-        adb.shell("screencap -p /sdcard/audit_%s.png" % datetime.now().strftime("%Y%m%d_%H%M%S"))
-        result["screenshot"] = "/sdcard/audit_%s.png" % datetime.now().strftime("%Y%m%d_%H%M%S")
-        adb.shell("uiautomator dump /sdcard/audit_%s.xml" % datetime.now().strftime("%Y%m%d_%H%M%S"))
+        adb.shell("screencap -p /sdcard/audit_%s.png" % stamp)
+        result["screenshot"] = "/sdcard/audit_%s.png" % stamp
+        adb.shell("uiautomator dump /sdcard/audit_%s.xml" % stamp)
+        result["dump"] = "/sdcard/audit_%s.xml" % stamp
     except Exception as e:
         log("  [audit] 截图/dump 失败: %s" % e)
 
@@ -1396,14 +1498,27 @@ def main():
 
     if args.audit:
         log("--- 审核模式：只核对今日积分与未完成任务 ---")
-        audit = audit_tasks(adb, human, log)
+        audit = audit_tasks(adb, human, log, jev=jev)
         adb.stop_bing()
         if audit.get("full"):
             print("[audit] 今日积分 %s 已满" % audit.get("daily"))
         else:
-            print("[audit] 今日积分 %s 未满，未完成 %d 项：" % (audit.get("daily"), len(audit.get("pending") or [])))
+            print("[audit] 今日积分 %s 未满" % audit.get("daily"))
+            print("[audit] 未完成 %d 项：" % len(audit.get("pending") or []))
             for p in (audit.get("pending") or []):
                 print("  - %s (%d/%d)" % (p["name"], p["earned"], p["need"]))
+            j = audit.get("jev")
+            if j:
+                print("[audit] Jev 语义核对：显著未完成=%s conf=%.2f"
+                      % (j.get("pending"), j.get("confidence", 0)))
+            if audit.get("disagreement"):
+                d = audit["disagreement"]
+                print("[audit] ⚠ Jev 与规则不一致：仅Jev=%s 仅规则=%s（以规则为准，请人工确认）"
+                      % (d["only_jev"], d["only_rule"]))
+            if audit.get("screenshot"):
+                print("[audit] 截图留证: %s" % audit["screenshot"])
+            if audit.get("dump"):
+                print("[audit] UI dump: %s" % audit["dump"])
         return 0 if audit.get("full") else 1
 
     if args.dry_run:
@@ -1446,7 +1561,7 @@ def main():
     if not args.single:
         log("--- 审核：核对今日积分 ---")
         try:
-            audit = audit_tasks(adb, human, log)
+            audit = audit_tasks(adb, human, log, jev=jev)
         except Exception as e:
             log("  [audit] 审核异常: %s" % e)
 
@@ -1496,8 +1611,17 @@ def main():
                 % (audit.get("daily"), len(audit.get("pending") or [])))
             for p in (audit.get("pending") or []):
                 log("  未完成: %s (%d/%d)" % (p["name"], p["earned"], p["need"]))
+            j = audit.get("jev")
+            if j:
+                log("  Jev 语义核对: 显著未完成=%s conf=%.2f" % (j.get("pending"), j.get("confidence", 0)))
+            if audit.get("disagreement"):
+                d = audit["disagreement"]
+                log("  ⚠ Jev 与规则不一致: 仅Jev=%s 仅规则=%s（以规则为准，请人工确认）"
+                    % (d["only_jev"], d["only_rule"]))
             if audit.get("screenshot"):
                 log("  现场留证: %s" % audit["screenshot"])
+            if audit.get("dump"):
+                log("  UI dump: %s" % audit["dump"])
     return 0 if all_status == "done" else (1 if ok else 2)
 
 
