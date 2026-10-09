@@ -22,17 +22,26 @@ echo "已写入 crontab："
 crontab -l
 
 echo "=== 3/4 启动 crond ==="
-# runit 服务目录里若存在 down 文件则服务被标记停用，删掉它
+# 重要：crond 只能有一个实例。两个 crond 读同一份 crontab 会导致同一时刻触发两次任务
+# （实测 10-09 双实例并发：读积分失败、quiz 三连败）。优先用 runit 服务管理；
+# 若 runit 不可用才回退手动启动，且先确保没有已在运行的 crond。
 rm -f "$SVDIR/crond/down"
-pkill crond 2>/dev/null || true
-sleep 1
-# Termux 的 crond 直接后台跑即可（sv 在部分环境下服务目录解析异常）
-nohup crond > "$APP/logs/crond.log" 2>&1 &
+if sv up crond 2>/dev/null && sv status crond 2>/dev/null | grep -q "^run:"; then
+  echo "crond 由 runit 管理（开机自启）"
+else
+  echo "runit 不可用，回退手动启动"
+  pkill crond 2>/dev/null || true
+  sleep 1
+  nohup crond > "$APP/logs/crond.log" 2>&1 &
+fi
 sleep 3
 
 echo "=== 4/4 状态 ==="
-if pgrep -f crond > /dev/null; then
-  echo "crond 运行中（pid $(pgrep -f crond | head -1)）"
+running=$(pgrep -c -f 'crond' 2>/dev/null || echo 0)
+echo "crond 相关进程数: $running"
+pgrep -af crond 2>&1
+if [ "$running" -ge 1 ]; then
+  echo "crond 运行中"
 else
   echo "crond 未运行；重试：nohup crond > $APP/logs/crond.log 2>&1 &"
 fi

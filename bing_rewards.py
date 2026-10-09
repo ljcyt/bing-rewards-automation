@@ -13,6 +13,7 @@ Bing Rewards 云手机每日任务自动化（纯 adb + Python，无必装第三
 """
 
 import argparse
+import atexit
 import json
 import math
 import os
@@ -1444,6 +1445,52 @@ def main():
         print("找不到配置文件 %s（可从 config.example.json 复制一份）" % args.config)
         return 2
     cfg = load_config(args.config)
+
+    # 单实例锁：cron 与手动/多入口同时触发时只跑一个（并发会互抢设备，导致读积分失败、
+    # 任务误判——实测 10-09 双实例并发时 points 读成 None、quiz 三连败）。
+    # dry-run / --audit / --single 不加锁（只读或调试，允许与正式跑并存）。
+    lock_path = os.path.join(BASE_DIR, ".bing_rewards.lock")
+    lock_fd = None
+    if not args.dry_run and not args.audit and not args.single:
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(lock_fd, str(os.getpid()).encode())
+        except FileExistsError:
+            # 锁文件存在：检查持锁进程是否还活着，死了则接管（避免崩溃后永久卡死）
+            stale = False
+            try:
+                with open(lock_path, encoding="utf-8") as f:
+                    old_pid = int((f.read() or "0").strip())
+                if old_pid > 0:
+                    os.kill(old_pid, 0)  # 不发送信号，仅探测存活
+                else:
+                    stale = True
+            except (ProcessLookupError, ValueError):
+                stale = True
+            except PermissionError:
+                stale = False  # 进程存在但无权限探测 → 视为活着
+            if stale:
+                try:
+                    os.unlink(lock_path)
+                    lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.write(lock_fd, str(os.getpid()).encode())
+                except OSError:
+                    print("另一实例正在运行（锁 %s），本次退出" % lock_path)
+                    return 0
+            else:
+                print("另一实例正在运行（锁 %s），本次退出" % lock_path)
+                return 0
+        if lock_fd is not None:
+            def _release_lock():
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
+                try:
+                    os.unlink(lock_path)
+                except OSError:
+                    pass
+            atexit.register(_release_lock)
 
     log = Logger(os.path.join(BASE_DIR, "logs"), dry=args.dry_run)
     log("=== bing_rewards 启动 mode=%s config=%s ===" % ("DRY-RUN" if args.dry_run else "RUN", args.config))
