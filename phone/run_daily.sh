@@ -22,11 +22,14 @@ adb start-server >/dev/null 2>&1 || true
 adb connect 127.0.0.1:5555 >/dev/null 2>&1 || true
 
 # 主任务（脚本内部跑完会自动审核今日积分；未满则抓取未完成任务并截图留证）
-python3 bing_rewards.py >> "$LOG" 2>&1
+# 注意：bing_rewards.py 的 Logger 自己会写 logs/run_日期.log，这里 stdout 另存一份
+# 避免与它写同一个文件导致每行重复（曾因此误判为双实例并发）。
+python3 bing_rewards.py >> "$APP/logs/stdout_$(date +%Y-%m-%d).log" 2>&1
 RC=$?
 echo "[$(date)] === 退出码 $RC ===" >> "$LOG"
 
 # 只保留最近 14 天日志
 find "$APP/logs" -name 'run_*.log' -mtime +14 -delete 2>/dev/null || true
+find "$APP/logs" -name 'stdout_*.log' -mtime +14 -delete 2>/dev/null || true
 
 exit $RC

@@ -65,9 +65,40 @@ bash /sdcard/br/setup_cron.sh
 
 改时间：编辑 crontab（`crontab -e`），第一列是分钟、第二列是小时。例如每天 20:30 就写 `30 20 * * * ...`。
 
-确认 crond 在跑：`pgrep -f crond`。若开机后没自启，手动 `nohup crond > /dev/null 2>&1 &`。
+### 6. 配保活（重要，否则任务会中断）
 
-### 6. 随时审核（不跑任务）
+```bash
+bash /sdcard/br/setup_keepalive.sh
+```
+
+Termux 进程被系统回收、或设备休眠时，定时任务会静默停掉。保活分两部分：
+
+**电脑侧**（adb 直接设置，无需 root）：
+
+```bash
+adb -s 127.0.0.1:55556 shell "dumpsys deviceidle whitelist +com.termux"
+adb -s 127.0.0.1:55556 shell "cmd appops set com.termux RUN_IN_BACKGROUND allow"
+adb -s 127.0.0.1:55556 shell "cmd appops set com.termux START_FOREGROUND allow"
+adb -s 127.0.0.1:55556 shell "device_config put activity_manager max_phantom_processes 2147483647"
+```
+
+最后一条针对 Android 13 的幽灵进程回收机制，云手机多为 Android 13，不加这条 Termux 会被定期杀掉。
+
+**手机侧**（`setup_keepalive.sh` 自动完成）：
+
+- `termux-wake-lock` 持锁防休眠
+- 把 `watcher` 和 `crond` 交给 **termux-services（runit）托管** —— 被杀死后约 5 秒自动重启，Termux 重开后自动拉起
+
+验证托管是否生效：
+
+```bash
+sv status watcher   # 期望 run: watcher: (pid NNNN)
+sv status crond
+```
+
+实测：强杀 watcher 进程后 8 秒内 runsv 自动拉起新实例。
+
+### 7. 随时审核（不跑任务）
 
 ```bash
 cd ~/bing-rewards && python3 bing_rewards.py --audit

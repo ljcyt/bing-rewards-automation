@@ -34,6 +34,7 @@ BING_PKG = "com.microsoft.bing"
 BING_MAIN_ACTIVITY = f"{BING_PKG}/com.microsoft.sapphire.app.main.SapphireMainActivity"
 # 已验证 resource-id（Bing 32.6.2110003561）
 ID_PROFILE_BUTTON = "sa_profile_button"
+ID_PROFILE_PANEL = "sa_profile_panel"  # 个人资料页容器（判断"已在该页"）
 ID_REWARDS_ROOT = "sa_profile_rewards_root"
 ID_TOTAL_POINTS = "sa_profile_my_rewards_points"
 ID_DAILY_POINTS = "sa_profile_daily_points"
@@ -157,14 +158,15 @@ class Adb:
     def dump(self):
         """uiautomator dump → 返回原始 XML 字符串；失败重试 3 次。"""
         last_err = None
-        for _ in range(3):
+        for _ in range(4):
             out = self.shell("uiautomator dump /sdcard/ui.xml && cat /sdcard/ui.xml",
                              timeout=40, check=False)
             if "<hierarchy" in out:
                 self.shell("rm /sdcard/ui.xml", check=False)
                 return out[out.index("<hierarchy"):]
             last_err = out.strip()[:200]
-            time.sleep(1.5)
+            # "could not get idle state" 表示界面仍在动画/滚动，等待后重试更有效
+            time.sleep(2.5)
         self.shell("rm /sdcard/ui.xml", check=False)
         raise AdbError("uiautomator dump 失败: %s" % last_err)
 
@@ -742,6 +744,25 @@ def parse_points(txt):
     return int(m.group().replace(",", "")) if m else None
 
 
+def _wait_for_anchor(adb, log, anchor_id, tries=6, gap=2.5):
+    """轮询等待某个锚点出现并返回该 Screen；超时返回 None。
+
+    云手机渲染慢时，点进页面后固定 sleep 常常不够（实测点头像后 6s 仍可能
+    未渲染出积分卡）。轮询比固定等待更可靠，且总耗时上限可控。
+    """
+    for i in range(tries):
+        try:
+            screen = Screen(adb.dump(), adb.current_activity())
+        except AdbError as e:
+            log("  [nav] dump 失败(第 %d 次): %s" % (i + 1, e))
+            time.sleep(gap)
+            continue
+        if screen.by_id(anchor_id, require_real=True):
+            return screen
+        time.sleep(gap)
+    return None
+
+
 def goto_profile(adb, human, log):
     """回到个人资料页（积分入口卡片所在页），返回该页 Screen 或 None。"""
     act = adb.current_activity()
@@ -749,21 +770,31 @@ def goto_profile(adb, human, log):
         adb.start_bing()
         human.sleep(*human.page, tag="bing_start")
     for attempt in range(3):
-        screen = Screen(adb.dump(), adb.current_activity())
+        try:
+            screen = Screen(adb.dump(), adb.current_activity())
+        except AdbError as e:
+            log("  [nav] dump 失败: %s" % e)
+            human.sleep(2.0, 3.0, tag="retry_dump")
+            continue
         if handle_popup(screen, human, adb, log):
             continue
-        if screen.by_id(ID_REWARDS_ROOT):
+        if screen.by_id(ID_REWARDS_ROOT, require_real=True):
             return screen
+        # 已在个人资料页但积分卡未渲染完 → 轮询等待（不重复点击，避免误触）
+        if screen.by_id(ID_PROFILE_PANEL, require_real=True):
+            scr = _wait_for_anchor(adb, log, ID_REWARDS_ROOT)
+            if scr:
+                return scr
         n = screen.by_id(ID_PROFILE_BUTTON, require_real=True)
         if n:
             safe_tap(human, adb, n, log)
         else:
             log("  [nav] HARD_FALLBACK 进头像（基线坐标 102,175 按分辨率换算）")
             adb.scaled_tap(102, 175)
-        human.sleep(*human.page, tag="profile")
-        screen = Screen(adb.dump(), adb.current_activity())
-        if screen.by_id(ID_REWARDS_ROOT):
-            return screen
+        # 点击后轮询等待积分卡出现（替代固定 sleep，抗云手机渲染慢）
+        scr = _wait_for_anchor(adb, log, ID_REWARDS_ROOT)
+        if scr:
+            return scr
     log("  [nav] 未能确认个人资料页积分卡")
     return None
 
@@ -783,6 +814,19 @@ def read_points(adb, human, log):
     n = screen.by_id(ID_STREAK)
     if n:
         res["streak"] = n.text.strip()
+    # 页面已到但积分文本没渲染出来（云手机慢）→ 等一次再读，避免误报 None
+    if not res or "daily" not in res:
+        scr = _wait_for_anchor(adb, log, ID_DAILY_POINTS, tries=3, gap=2.0)
+        if scr:
+            n = scr.by_id(ID_TOTAL_POINTS)
+            if n:
+                res["total"] = parse_points(n.text)
+            n = scr.by_id(ID_DAILY_POINTS)
+            if n:
+                res["daily"] = n.text.strip()
+            n = scr.by_id(ID_STREAK)
+            if n:
+                res["streak"] = n.text.strip()
     log("  [points] %s" % res if res else "  [points] 未读到积分锚点")
     return res or None
 
@@ -1325,8 +1369,12 @@ def audit_tasks(adb, human, log, target_daily=120, jev=None):
               "full": False, "pending": [], "done": [], "jev": None,
               "disagreement": None, "screenshot": None, "dump": None}
 
-    # 1) 读今日积分
-    pts = read_points(adb, human, log)
+    # 1) 读今日积分（dump 可能因界面/设备抖动失败，不能让审核崩掉）
+    try:
+        pts = read_points(adb, human, log)
+    except Exception as e:
+        log("  [audit] 读积分失败: %s → 尝试直接抓取任务清单" % e)
+        pts = None
     if pts:
         result["daily"] = pts.get("daily")
         m = re.match(r"\s*(\d+)\s*/\s*(\d+)", pts.get("daily") or "")
@@ -1600,7 +1648,13 @@ def main():
         if not args.single:
             human.sleep(*human.between, tag="between_tasks")
 
-    after = read_points(adb, human, log)
+    # 收尾读积分：设备/界面异常时不能让它崩掉整个流程（否则 results 写不出，
+    # 当天记录全丢）。失败时 after=None，审核仍会尝试读一次。
+    try:
+        after = read_points(adb, human, log)
+    except Exception as e:
+        log("  [points] 任务后读积分失败: %s" % e)
+        after = None
     log("任务后积分: %s" % after)
 
     # 审核：今日积分未满则抓取未完成任务清单（跑完即审，不需要人工核对）
