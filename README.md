@@ -65,15 +65,21 @@ Jev 后端关闭（`jev.backend=off`）或调用失败时，`audit.jev` 为 `nul
 - `human.start_jitter_minutes`：每日开始时间 ±25 分钟随机偏移；`zoneout_prob`：5-10% 概率的 20-40s"走神"长停顿；`tap_jitter_px`：点击坐标 ±30px 抖动。
 - `jev`：Jev 单步决策配置，`backend` 取 `api` / `local` / `off`。
 
-### TypeSafe AI API key 的用途与轮换
+### 决策后端的用途、两种服务与轮换
 
-- 用途：`jev.backend=api` 时，脚本把当前屏幕摘要（页面类型、锚点、可点文本）POST 到 TypeSafe AI 官方 System One 接口，由 Jev 模型（`jev-latest`）做单步判别，返回离散动作 choice + 置信度。
-- Endpoint / 模型名：TypeSafe AI 官方文档（truefoundry.com/docs/ai-gateway/jev）——`POST https://api.typesafe.ai/v1/systemone`，`Authorization: Bearer <key>`，body 为 TypeSafe 自有 schema `{"model", "state", "questions"}`，响应 `{"model", "answers", "usage"}`，模型别名 `jev-latest`。
-- **⚠️ 只认官方域名**：TypeSafe 官方域名只有 `api.typesafe.ai` 与 `console.typesafe.ai`，其他任何域名（包括第三方中转/代理站）都不是官方端点，配置为 `jev.endpoint` 会导致 key 被拒（401）。连通性自检：`python tools/test_jev_api.py`。
+- 用途：`jev.backend=api` 时，脚本把当前屏幕摘要（页面类型、锚点、可点文本）POST 到决策服务，由模型做单步判别，返回离散动作 choice + 置信度。
+- 请求协议（两种服务一致）：`POST <endpoint>`，`Authorization: Bearer <key>`，body `{"model", "state", "questions"}`，响应 `{"model", "answers", "usage"}`。`questions` 支持 `choice`（从候选动作中选）与 `noul`（判断"是否无可执行动作"，返回分数）两种原语。
+- **支持两个服务，按 key 前缀自动识别**：
+
+| 服务 | endpoint | model | key 前缀 | 备注 |
+|---|---|---|---|---|
+| Nace | `https://console.nace.ai/v1/systemone` | `drex-v1.5` | `nace_sk_` | 国内网络可直连，实测响应 6~134ms |
+| TypeSafe | `https://api.typesafe.ai/v1/systemone` | `jev-latest` | `apikey_` | 官方域名仅 `api.typesafe.ai` / `console.typesafe.ai` |
+
+- **key 前缀不做误改写**：脚本按已知前缀（`nace_sk_` / `apikey_` / `sk-`）原样保留；无已知前缀时才按 TypeSafe 裸 hex 处理补 `apikey_`。endpoint 与 model 必须与服务匹配。
 - **主备轮换机制**：`jev.api_keys` 数组存全部 key（主 key 在前，备用 key 依次排后）。请求遇到 HTTP 401/402/403/429 或响应含 quota/credit/insufficient 等额度类错误时，自动换下一个 key 重试；同一轮决策最多轮完全部 key，全部失效则本步降级规则引擎并记 `DECISION_BACKEND_FALLBACK`。key 只存配置文件，绝不硬编码进 py 脚本。
-- 替换：到 console.typesafe.ai 生成新 key，改 `config.json` 与 `config.example.json` 的 `jev.api_keys` 数组即可（不需要改脚本）。key 需为官方完整格式 `apikey_<hex_hex>`；脚本（`TypeSafeApiBackend.__init__`）会对裸 `hex_hex` 自动补 `apikey_` 前缀，裸 key 直发会 401。
-- 降级：API 超时（8s）/解析失败 → 本地 logits 后端（需 `pip install transformers torch`，未装自动禁用）→ 确定性规则引擎（永远可用）。`jev.backend` 设 `off` 直接走规则引擎，完全不联网。
-- 若你的账号所在区域/套餐 endpoint 不同，以 console 内文档为准修改 `jev.endpoint`。
+- 降级：API 超时（默认 15s，可配 `jev.timeout_s`）/解析失败 → 本地 logits 后端（需 `pip install transformers torch`，未装自动禁用）→ 确定性规则引擎（永远可用）。`jev.backend` 设 `off` 直接走规则引擎，完全不联网。
+- 连通性自检：`python tools/test_jev_api.py`。
 
 ## 每日定时（每天早上 9 点）
 

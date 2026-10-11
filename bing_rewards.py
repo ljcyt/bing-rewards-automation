@@ -405,10 +405,19 @@ class TypeSafeApiBackend:
         keys = list(jev_cfg.get("api_keys") or [])
         if jev_cfg.get("api_key") and jev_cfg["api_key"] not in keys:
             keys.append(jev_cfg["api_key"])
-        # key 规范化：官方鉴权要求 Bearer apikey_<hex_hex> 完整格式；
-        # config 里存裸 hex_hex 也可，使用前自动补 apikey_ 前缀（裸 key 直发会 401）
-        self.api_keys = [("apikey_" + k if not k.startswith("apikey_") else k)
-                         for k in keys if k]
+        # key 规范化：不同服务的前缀不同，按已知前缀保留原样，避免误改写。
+        #   TypeSafe 官方: apikey_<hex_hex>（config 里存裸 hex_hex 时自动补 apikey_）
+        #   Nace 官方:     nace_sk_<token>（本身就是完整 key，不可加前缀）
+        KNOWN_PREFIXES = ("apikey_", "nace_sk_", "sk-", "Bearer ")
+        self.api_keys = []
+        for k in keys:
+            if not k:
+                continue
+            if any(k.startswith(p) for p in KNOWN_PREFIXES):
+                self.api_keys.append(k)
+            else:
+                # 无已知前缀：按 TypeSafe 裸 hex 处理，补 apikey_
+                self.api_keys.append("apikey_" + k)
         self.key_index = 0
         self.model = jev_cfg.get("model", "jev-latest")
         self.timeout = jev_cfg.get("timeout_s", 8)
@@ -1547,15 +1556,25 @@ def main():
     adb = Adb(dev.get("serial", "127.0.0.1:55556"), dev.get("adb_path", "adb"), log)
 
     # 当日已完成检测（ONLOGON 补跑幂等）
+    # 注意：不能只看 all_status=done —— 单任务补跑（--single）也会写 done，
+    # 会把"跑过一个任务"误判成"全天完成"，从而挡住后续补跑。必须同时确认今日积分已满。
     results_dir = os.path.join(BASE_DIR, "results")
     today = datetime.now().strftime("%Y-%m-%d")
     result_path = os.path.join(results_dir, "%s.json" % today)
-    if not args.dry_run and not args.single and os.path.exists(result_path):
+    if not args.dry_run and not args.single and not args.audit and os.path.exists(result_path):
         try:
             with open(result_path, encoding="utf-8") as f:
                 prev = json.load(f)
-            if prev.get("all_status") == "done":
-                print("今日任务已完成（%s），直接退出" % today)
+            prev_full = False
+            dp = prev.get("daily_points_after") or ""
+            m = re.match(r"\s*(\d+)\s*/\s*(\d+)", str(dp))
+            if m and int(m.group(1)) >= int(m.group(2)):
+                prev_full = True
+            # 审核字段也认（audit.full=True 表示当天积分已满）
+            if (prev.get("audit") or {}).get("full"):
+                prev_full = True
+            if prev.get("all_status") == "done" and prev_full:
+                print("今日任务已完成且积分已满（%s），直接退出" % today)
                 return 0
         except (OSError, ValueError):
             pass
@@ -1685,7 +1704,12 @@ def main():
         "finished_at": datetime.now().isoformat(timespec="seconds"),
     }
     os.makedirs(results_dir, exist_ok=True)
-    with open(result_path, "w", encoding="utf-8") as f:
+    # --single 补跑写独立文件，避免覆盖当天完整运行结果（否则补跑一次就把全天记录冲掉）
+    if args.single:
+        write_path = os.path.join(results_dir, "%s_single_%s.json" % (today, args.single))
+    else:
+        write_path = result_path
+    with open(write_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     # CSV 追加: 日期,任务,结果,积分增量,置信度分布,兜底次数
     csv_path = os.path.join(results_dir, "summary.csv")
