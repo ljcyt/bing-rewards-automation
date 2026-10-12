@@ -287,10 +287,15 @@ human0 = br.Human({"delays": {"click": [0, 0], "page_load": [0, 0], "dwell_quiz"
 
 
 class RewardsFakeAdb(br.Adb):
-    """dump 按序列返回（末尾重复最后一帧）；记录 tap 的节点 label。"""
+    """dump 按序列返回（末尾重复最后一帧）；记录 tap 的节点 label。
+
+    dump 帧序列按需消耗，耗尽后固定返回最后一帧——调用方新增一次 dump
+    探针不应让断言失败（测试关心行为，不关心 dump 次数）。
+    """
     def __init__(self, frames):
         super().__init__("fake", "adb", log)
         self.frames = list(frames)
+        self.last = self.frames[0] if self.frames else "<hierarchy></hierarchy>"
         self.tapped = []
 
     def shell(self, cmd, **kw):
@@ -300,6 +305,11 @@ class RewardsFakeAdb(br.Adb):
         if self.frames:
             self.last = self.frames.pop(0)
         return self.last
+
+    def scaled_tap_safe(self, x, y, screen, log, tag=""):
+        # 单测环境：记录盲点坐标，不做禁区判定（由 test 单独覆盖 is_redeem_page）
+        self.tapped.append((x, y))
+        return True
 
     def current_activity(self):
         return "com.microsoft.sapphire.runtime.templates.TemplateActivity"
@@ -319,9 +329,9 @@ class RecordingHuman(br.Human):
         self.adb_ref.tapped.append(node.label)
 
 
-fa5 = RewardsFakeAdb([XML_CARD_PENDING, XML_CARD_PENDING,  # goto_rewards_entry 两次
-                      XML_CARD_PENDING,                    # round1 scan
-                      XML_CARD_DONE])                      # round2 scan(已赚取→skipped)
+fa5 = RewardsFakeAdb([XML_CARD_PENDING] * 8 + [XML_CARD_DONE])
+# goto_rewards_entry 现含 escape_redeem_page 探针 + 多轮导航，共消耗 8 帧；
+# 第 9 帧 XML_CARD_DONE 供 round2 scan 判定"已赚取→skipped"。
 rh = RecordingHuman(fa5)
 ctx5 = {"adb": fa5, "human": rh, "log": log,
         "jev": br.Jev({"jev": {"backend": "off"}}, log),
@@ -342,11 +352,12 @@ XML_ACT2 = ('<hierarchy>' + RW_ROOT +
             '<node text="每日活动" bounds="[48,300][1032,420]" clickable="true"/>'
             '<node content-desc="Melbourne, 已赚取的 10 积分" bounds="[48,500][1032,700]" clickable="true"/></hierarchy>')
 
-# goto 消耗 2 帧(进 rewards 页确认)；round1: scroll_find+候选 dump 各 1 帧 → 开 Day2 卡；
-# round2: scroll_find+候选 dump 各 1 帧 → 仅剩"已赚取" → break
-fa6 = RewardsFakeAdb([XML_ACT1, XML_ACT1,
-                      XML_ACT1, XML_ACT1,
-                      XML_ACT2, XML_ACT2])
+# goto 消耗帧（含 escape_redeem_page 探针）；round1: scroll_find+候选 dump → 开 Day2 卡；
+# round2: scroll_find+候选 dump → 仅剩"已赚取" → break
+fa6 = RewardsFakeAdb([XML_ACT1,          # escape_redeem_page 探针
+                      XML_ACT1, XML_ACT1,  # goto_rewards_entry
+                      XML_ACT1, XML_ACT1,  # round1: scroll_find + 候选
+                      XML_ACT2, XML_ACT2])  # round2: 仅剩已赚取 → break
 rh6 = RecordingHuman(fa6)
 ctx6 = {"adb": fa6, "human": rh6, "log": log,
         "jev": br.Jev({"jev": {"backend": "off"}}, log),
@@ -391,6 +402,57 @@ class _OffJev:
 
 assert br.Jev.audit(_OffJev(), ["x"], "80/120") is None
 passed.append("10 Jev 审核在后端关闭时返回 None（不抛异常，规则结果不受影响）")
+
+# ---------- 11) 礼品卡兑换页识别与逃生（10-12 事故回归）----------
+REDEEM_XML = ('<hierarchy>Product detail page for {itemData.groupTitle} gift card '
+              '立即兑换 Microsoft 禮物卡 $10 禮物卡 microsoft.com/cardterms '
+              '兑换成 Microsoft 禮物卡</hierarchy>')
+NORMAL_XML = ('<hierarchy>搜索以赚取, 已赚取的 60 积分 阅读以赚取 每日活动 签到 '
+              '兑换积分 订单历史记录</hierarchy>')
+
+
+class _S:
+    def __init__(self, xml, act='com.microsoft.bing/TemplateActivity'):
+        self.xml = xml
+        self.activity = act
+
+    def anchor_names(self):
+        return []
+
+
+assert br.is_redeem_page(_S(REDEEM_XML)) is True, "兑换页未识别"
+assert br.classify_page(_S(REDEEM_XML)) == "redeem_page", "未分类为 redeem_page"
+# 正常积分页不能误判（含"兑换积分"入口但无礼物卡特征）
+assert br.is_redeem_page(_S(NORMAL_XML)) is False, "正常积分页被误判为兑换页"
+passed.append("11 礼品卡兑换页识别（含正常页不误判）")
+
+
+# ---------- 12) 盲点点击安全线：坐标落在禁区元素上必须拒绝 ----------
+class _AdbTapProbe(br.Adb):
+    def __init__(self):
+        super().__init__("fake", "adb", log)
+        self.taps = []
+
+    def shell(self, cmd, **kw):
+        return "Override size: 1080x2346"
+
+    def tap(self, x, y):
+        self.taps.append((x, y))
+
+
+_probe = _AdbTapProbe()
+_redeem_screen = br.Screen(
+    '<hierarchy><node text="立即兑换" bounds="[400,500][700,800]" clickable="true"/></hierarchy>',
+    'com.microsoft.bing/TemplateActivity')
+_ok = _probe.scaled_tap_safe(540, 649, _redeem_screen, log)
+assert _ok is False, "禁区坐标未被拦截"
+assert not _probe.taps, "禁区坐标仍被点击: %r" % _probe.taps
+_safe_screen = br.Screen(
+    '<hierarchy><node text="查看详情" bounds="[400,500][700,800]" clickable="true"/></hierarchy>',
+    'com.microsoft.bing/TemplateActivity')
+_ok2 = _probe.scaled_tap_safe(540, 649, _safe_screen, log)
+assert _ok2 is True and _probe.taps, "安全坐标被误拦"
+passed.append("12 盲点点击安全线（禁区坐标拒绝、安全坐标放行）")
 
 print("\n".join("PASS " + p for p in passed))
 print("ALL_UNIT_TESTS_OK")

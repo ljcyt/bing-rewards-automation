@@ -155,6 +155,30 @@ class Adb:
         W, H = self.screen_size()
         self.tap(x * W // 1080, y * H // 2346)
 
+    def scaled_tap_safe(self, x, y, screen, log, tag=""):
+        """带安全校验的盲点点击：点击前确认该坐标不落在禁区元素上。
+
+        盲点固定坐标绕过了 forbidden_hit（它只检查元素文本），实测曾因 HARD_FALLBACK
+        坐标落到礼品卡兑换轮播上而误入兑换详情页（10-12 事故）。这里用 dump 的元素
+        bounds 反查坐标所属元素，命中禁区词则拒绝点击。
+        返回 True=已点击，False=被安全线拦下。
+        """
+        W, H = self.screen_size()
+        px, py = x * W // 1080, y * H // 2346
+        # 找包含该点的最深层元素（bounds 面积最小者），检查是否命中禁区
+        hit = None
+        for n in screen.nodes:
+            x1, y1, x2, y2 = n.bounds
+            if x1 <= px <= x2 and y1 <= py <= y2:
+                if hit is None or (x2 - x1) * (y2 - y1) < (hit.bounds[2] - hit.bounds[0]) * (hit.bounds[3] - hit.bounds[1]):
+                    hit = n
+        if hit is not None and forbidden_hit(hit):
+            log("  [SAFE] REFUSED_FORBIDDEN_ZONE(盲点): 坐标(%d,%d) 落在 %r 上，拒绝点击" % (px, py, hit.label[:40]))
+            return False
+        # 兜底：整个页面若出现兑换轮播关键锚点，且该点在页面上半部兑换区，也拒绝
+        self.tap(px, py)
+        return True
+
     def dump(self):
         """uiautomator dump → 返回原始 XML 字符串；失败重试 3 次。"""
         last_err = None
@@ -366,10 +390,26 @@ RULE_TABLE = {
 }
 
 
+def is_redeem_page(screen):
+    """判断当前是否在礼品卡兑换页（硬禁区）。命中即必须立刻退出。
+
+    实测特征（10-12 事故页面）：'Product detail page for ... gift card'、
+    '$10 禮物卡'、'立即兑换'、'依据...规范' 等。这里用多重特征降低误判。
+    """
+    txt = screen.xml
+    hits = 0
+    for k in ("立即兑换", "Product detail page", "禮物卡", "礼物卡", "cardterms", "兑换成 Microsoft"):
+        if k in txt:
+            hits += 1
+    return hits >= 2
+
+
 def classify_page(screen):
     """第一级分类：锚点特征 → 离散页面类型。"""
     if ERROR_POPUP_RE.search(screen.xml):
         return "popup"
+    if is_redeem_page(screen):
+        return "redeem_page"  # 硬禁区：调用方须立刻退出
     ids = screen.anchor_names()
     txt = screen.xml
     if ID_RESULT_BAR in ids or "BrowserActivity" in screen.activity:
@@ -729,6 +769,40 @@ def safe_tap(human, adb, node, log):
 
 
 # ---------------------------------------------------------------- 弹窗处置
+def escape_redeem_page(adb, human, log, screen=None):
+    """若当前在礼品卡兑换页（硬禁区），立刻退出到首页。返回 True 表示做过逃生。
+
+    这是最后一道防线：无论因何原因进入了兑换页（含盲点坐标误触），
+    都要在继续任何操作前退出，绝不在该页面上做任何点击。
+    传入 screen 可复用已 dump 的结果，避免多余 dump（也便于单测注入）。
+    """
+    try:
+        if screen is None:
+            screen = Screen(adb.dump(), adb.current_activity())
+    except AdbError:
+        return False
+    if not is_redeem_page(screen):
+        return False
+    log("  [SAFE] 检测到礼品卡兑换页（硬禁区）→ 立即退出，不做任何点击")
+    for _ in range(4):
+        adb.key(KEY_BACK)
+        human.sleep(1.5, 2.5, tag="escape_redeem")
+        try:
+            scr = Screen(adb.dump(), adb.current_activity())
+        except AdbError:
+            continue
+        if not is_redeem_page(scr):
+            log("  [SAFE] 已退出兑换页")
+            return True
+    # BACK 无效则冷启动回首页
+    log("  [SAFE] BACK 未能退出兑换页 → 冷启动恢复")
+    adb.stop_bing()
+    human.sleep(1.5, 2.5, tag="escape_restart")
+    adb.start_bing()
+    human.sleep(*human.page, tag="escape_home")
+    return True
+
+
 def handle_popup(screen, human, adb, log):
     """命中弹窗按钮词或错误弹窗则处置；返回 True 表示处置过。"""
     if ERROR_POPUP_RE.search(screen.xml):
@@ -778,6 +852,7 @@ def goto_profile(adb, human, log):
     if BING_PKG not in act:
         adb.start_bing()
         human.sleep(*human.page, tag="bing_start")
+    escape_redeem_page(adb, human, log)  # 硬禁区：先确保不在兑换页
     for attempt in range(3):
         try:
             screen = Screen(adb.dump(), adb.current_activity())
@@ -799,7 +874,7 @@ def goto_profile(adb, human, log):
             safe_tap(human, adb, n, log)
         else:
             log("  [nav] HARD_FALLBACK 进头像（基线坐标 102,175 按分辨率换算）")
-            adb.scaled_tap(102, 175)
+            adb.scaled_tap_safe(102, 175, screen, log)
         # 点击后轮询等待积分卡出现（替代固定 sleep，抗云手机渲染慢）
         scr = _wait_for_anchor(adb, log, ID_REWARDS_ROOT)
         if scr:
@@ -848,6 +923,7 @@ def goto_rewards_entry(adb, human, log):
         log("  [nav] Bing 不在前台(%s) → 先启动" % act)
         adb.start_bing()
         human.sleep(*human.page, tag="bing_start")
+    escape_redeem_page(adb, human, log)  # 硬禁区：先确保不在兑换页
     for attempt in range(3):
         screen = Screen(adb.dump(), adb.current_activity())
         if handle_popup(screen, human, adb, log):
@@ -866,7 +942,7 @@ def goto_rewards_entry(adb, human, log):
             safe_tap(human, adb, n, log)
         else:
             log("  [nav] HARD_FALLBACK 进头像（基线坐标 102,175 按分辨率换算）")
-            adb.scaled_tap(102, 175)
+            adb.scaled_tap_safe(102, 175, screen, log)
         human.sleep(*human.page, tag="profile")
         screen = Screen(adb.dump(), adb.current_activity())
         n = screen.by_id(ID_REWARDS_ROOT, require_real=True)
@@ -878,7 +954,7 @@ def goto_rewards_entry(adb, human, log):
                 return True
             continue
         log("  [nav] HARD_FALLBACK 进积分卡（基线坐标 540,649 按分辨率换算）")
-        adb.scaled_tap(540, 649)
+        adb.scaled_tap_safe(540, 649, screen, log)
         human.sleep(*human.page, tag="rewards")
         scr2 = Screen(adb.dump(), adb.current_activity())
         if "TemplateActivity" in scr2.activity or scr2.by_id(ID_TOTAL_POINTS):
