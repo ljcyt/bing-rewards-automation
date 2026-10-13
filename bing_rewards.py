@@ -45,7 +45,10 @@ ID_RESULT_BAR = "iab_address_bar_text_view"
 ID_BACK = "sa_template_header_action_back"
 
 # 硬禁区：任何候选动作文本命中即一票否决（Rewards 页礼品卡兑换轮播 / 底部兑换入口）
-FORBIDDEN_KEYWORDS = ["兑换", "redeem", "提现", "订单历史", "Rewards网站", "rewa rd site"]
+FORBIDDEN_KEYWORDS = ["兑换", "redeem", "提现", "订单历史", "Rewards网站", "rewa rd site",
+                      # 礼品卡兑换轮播（积分页顶部就有，10-13 实测 HARD_FALLBACK 盲点
+                      # 坐标 540,649 正好落在 'Microsoft 禮物卡' 轮播上，导致误入兑换详情页）
+                      "禮物卡", "礼物卡", "gift card", "電子禮物", "电子礼物"]
 
 # 弹窗扫描关键词 + 错误弹窗正则
 POPUP_BUTTON_WORDS = ["同意", "接受", "允许", "知道了", "关闭", "取消", "Not now", "No thanks", "OK"]
@@ -924,10 +927,29 @@ def goto_rewards_entry(adb, human, log):
         adb.start_bing()
         human.sleep(*human.page, tag="bing_start")
     escape_redeem_page(adb, human, log)  # 硬禁区：先确保不在兑换页
+    # 冷启动后页面可能还没渲染完（实测 4s 时锚点尚未就绪，会误走 HARD_FALLBACK 盲点）。
+    # 先轮询等待"首页锚点"或"已在积分页"任一成立，再进入导航分支。
+    for _ in range(5):
+        try:
+            pre = Screen(adb.dump(), adb.current_activity())
+        except AdbError:
+            time.sleep(2.0)
+            continue
+        if ("TemplateActivity" in pre.activity
+                or pre.by_id(ID_PROFILE_BUTTON, require_real=True)
+                or pre.by_id(ID_REWARDS_ROOT, require_real=True)
+                or pre.by_id(ID_SEARCH_BOX, require_real=True)):
+            break
+        time.sleep(2.0)
     for attempt in range(3):
         screen = Screen(adb.dump(), adb.current_activity())
         if handle_popup(screen, human, adb, log):
             continue
+        # 已在 Rewards 任务页（TemplateActivity）→ 直接返回。
+        # 缺此判断会往下走去点"头像"（首页元素），而当前页没有该元素 → 导航反复失败。
+        # 注意：只用 TemplateActivity 判定；ID_TOTAL_POINTS 在资料页也存在，会误判。
+        if "TemplateActivity" in screen.activity:
+            return True
         if screen.by_id(ID_REWARDS_ROOT):
             n = screen.by_id(ID_REWARDS_ROOT, require_real=True)
             if n:
@@ -953,8 +975,21 @@ def goto_rewards_entry(adb, human, log):
             if "TemplateActivity" in scr2.activity or scr2.by_id(ID_TOTAL_POINTS):
                 return True
             continue
-        log("  [nav] HARD_FALLBACK 进积分卡（基线坐标 540,649 按分辨率换算）")
-        adb.scaled_tap_safe(540, 649, screen, log)
+        # 兜底：不用固定坐标（实测 540,649 在 Rewards 页会落到礼品卡兑换轮播上，
+        # 导致误入兑换详情页）。改为按文字特征定位"总积分/每日积分"卡片区域。
+        card = None
+        for n in screen.nodes:
+            hay = (n.text or "") + " " + (n.desc or "")
+            if any(k in hay for k in ("总积分", "每日积分", "Microsoft Rewards")):
+                anc = tapable_ancestor(n) if not n.real else n
+                if anc and anc.clickable and not forbidden_hit(anc):
+                    card = anc
+                    break
+        if card is not None:
+            log("  [nav] 兜底：按文字特征点积分卡 %r" % card.label[:40])
+            safe_tap(human, adb, card, log)
+        else:
+            log("  [nav] 未能定位积分卡，跳过本次兜底点击（不做盲点点击，避免误触兑换轮播）")
         human.sleep(*human.page, tag="rewards")
         scr2 = Screen(adb.dump(), adb.current_activity())
         if "TemplateActivity" in scr2.activity or scr2.by_id(ID_TOTAL_POINTS):

@@ -454,5 +454,24 @@ _ok2 = _probe.scaled_tap_safe(540, 649, _safe_screen, log)
 assert _ok2 is True and _probe.taps, "安全坐标被误拦"
 passed.append("12 盲点点击安全线（禁区坐标拒绝、安全坐标放行）")
 
+
+# ---------- 13) 礼品卡轮播词加入禁区（10-13 事故回归）----------
+# 积分页顶部轮播 desc 是 'Microsoft 禮物卡, item 2 of 3'，不含"兑换"字样，
+# 旧禁区词表拦不住；坐标 540,649 正好落在其上 → 必须能识别为禁区
+_wheel_screen = br.Screen(
+    '<hierarchy><node content-desc="Microsoft 禮物卡, item 2 of 3" '
+    'bounds="[433,388][797,920]" clickable="true"/></hierarchy>',
+    'com.microsoft.bing/TemplateActivity')
+_probe2 = _AdbTapProbe()
+_ok3 = _probe2.scaled_tap_safe(540, 649, _wheel_screen, log)
+assert _ok3 is False, "礼品卡轮播坐标未被拦截"
+assert not _probe2.taps, "礼品卡轮播仍被点击: %r" % _probe2.taps
+# 直接验证 forbidden_hit 覆盖礼物卡文案
+for _kw in ("Microsoft 禮物卡", "XBOX 電子禮物卡", "Gift Card", "礼物卡"):
+    _n = br.Node(rid="", text=_kw, desc="", bounds=(0, 0, 10, 10),
+                 clickable=True, checked=False, cls="", parent=None)
+    assert br.forbidden_hit(_n), "禁区词未覆盖: %r" % _kw
+passed.append("13 礼品卡轮播文案纳入禁区（禮物卡/礼物卡/gift card）")
+
 print("\n".join("PASS " + p for p in passed))
 print("ALL_UNIT_TESTS_OK")
